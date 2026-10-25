@@ -10,32 +10,15 @@ permissions:
 
 jobs:
   build:
-    # The Windows installer embeds the Linux musl `tty7-server` so a WSL distro
-    # can be served the binary the client already shipped with, instead of
-    # downloading one (WSL installs nothing over the network). That
-    # binary comes from `server-musl`, so the two jobs can no longer run in
-    # parallel. Serialising all four platforms behind it costs a few minutes on
-    # a release — cheap next to splitting the Windows entry into its own job and
-    # duplicating the whole toolchain/caching preamble.
     needs: server-musl
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
-            os: macos
-            arch: arm64
-            target: aarch64-apple-darwin
-          # macos-13 was retired; macos-15-intel is the remaining hosted x86_64 image.
-          - runner: macos-15-intel
-            os: macos
-            arch: x86_64
-            target: x86_64-apple-darwin
           - runner: windows-latest
             os: windows
             arch: x86_64
             target: x86_64-pc-windows-msvc
-            wsl-server: tty7-server-linux-x86_64-musl
           # Cross-compiled from the x64 runner, like `server-windows`'s ARM64
           # leg. Experimental until it has shipped once: a failure here drops
           # the ARM64 packages from the release instead of holding it up, and
@@ -44,12 +27,7 @@ jobs:
             os: windows
             arch: arm64
             target: aarch64-pc-windows-msvc
-            wsl-server: tty7-server-linux-aarch64-musl
             experimental: true
-          - runner: ubuntu-latest
-            os: linux
-            arch: x86_64
-            target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental == true }}
     steps:
@@ -60,19 +38,6 @@ jobs:
 
       # gpui-component is pulled as a git dependency (see Cargo.toml's patch
       # section), so no sibling checkout is needed.
-
-      # gpui's Linux backends resolve the x11/wayland/xkb/font dev packages via
-      # pkg-config at build time — the same set the README documents for
-      # building from source on Linux.
-      - name: Install Linux system dependencies
-        if: matrix.os == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config cmake clang libxkbcommon-dev \
-            libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
-            libwayland-dev libx11-dev libxcb1-dev libzstd-dev libssl-dev \
-            libkrb5-dev libfuse2 file imagemagick
-          echo "LIBGSSAPI_IMPL=mit" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -87,10 +52,8 @@ jobs:
 
       # `--locked` because a release must ship the dependency set the tag
       # recorded, not whatever cargo would re-resolve at build time. Safe here
-      # (unlike nightly) precisely because nothing rewrites Cargo.toml: this is
-      # a plain checkout of the tagged commit.
-      # The updater ships on every GUI platform now: inside the macOS bundle,
-      # beside the Windows app, and inside the Linux AppImage.
+      # precisely because nothing rewrites Cargo.toml: this is a plain checkout
+      # of the tagged commit.
       - name: Build
         working-directory: tty7
         shell: bash
@@ -98,59 +61,6 @@ jobs:
           cargo build --release --locked --target "${{ matrix.target }}"
           cargo build --release --locked --features updater \
             --bin tty7-updater --target "${{ matrix.target }}"
-
-      # ---- Packaging: one step per OS ----------------------------------------
-      # macOS gets a signed + notarized drag-to-Applications DMG. Windows gets
-      # an Inno Setup installer plus a portable zip; Linux a tarball — both
-      # unsigned, of the self-contained binary (fonts are embedded via
-      # include_bytes!; the Windows icon is compiled in via build.rs).
-      - name: Bundle macOS DMG
-        if: matrix.os == 'macos'
-        working-directory: tty7
-        env:
-          # macOS code signing — the cert is imported into a throwaway keychain.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          # Notarization — required for Developer ID builds to pass Gatekeeper.
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: bash .github/scripts/bundle-macos.sh "${{ matrix.target }}" "${{ matrix.arch }}"
-
-      - name: Package Linux tarball
-        if: matrix.os == 'linux'
-        working-directory: tty7
-        run: bash .github/scripts/bundle-linux.sh "${{ matrix.target }}" "${{ matrix.arch }}"
-
-      # AppImage bundles the x11/wayland/xkb/font libs so it runs on Fedora/Arch/
-      # etc., not just Ubuntu. Kept separate from the tarball step so the tarball
-      # still ships even if AppImage tooling changes upstream.
-      - name: Package Linux AppImage
-        if: matrix.os == 'linux'
-        working-directory: tty7
-        run: bash .github/scripts/bundle-appimage.sh "${{ matrix.target }}" "${{ matrix.arch }}"
-
-      # The in-app updater refuses an image whose bundled helper or stamped
-      # version is wrong — on the user's machine, after the download. Check the
-      # same facts here so a packaging mistake fails the release instead.
-      - name: Verify Linux AppImage update package
-        if: matrix.os == 'linux'
-        working-directory: tty7
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="$(grep -m1 '^version = "' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          IMAGE="$PWD/dist/tty7-${VERSION}-linux-${{ matrix.arch }}.AppImage"
-          VERIFY_ROOT="$RUNNER_TEMP/tty7-appimage-update-verify"
-          rm -rf "$VERIFY_ROOT"
-          mkdir -p "$VERIFY_ROOT"
-          (cd "$VERIFY_ROOT" && "$IMAGE" --appimage-extract >/dev/null)
-          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty7-app"
-          test -x "$VERIFY_ROOT/squashfs-root/usr/bin/tty7-updater"
-          grep -Fxq "X-AppImage-Version=${VERSION}" \
-            "$VERIFY_ROOT/squashfs-root/usr/share/applications/tty7.desktop"
 
       # The bundled server for WSL. `continue-on-error` mirrors `server-musl`'s
       # own probe step: if there is no server asset, the release still ships and
@@ -180,34 +90,17 @@ jobs:
         shell: pwsh
         run: '& ./.github/scripts/verify-windows-package.ps1 "${{ matrix.arch }}"'
 
-      # Hand the artifacts to the assemble job rather than uploading them to the
-      # release here. Four parallel jobs each publishing their own slice would
-      # make the release "latest" the moment the *first* platform finished — the
-      # in-app update check (src/core/update.rs) reads /releases/latest, so users
-      # would be prompted to download a release that was still missing most of
-      # its assets. Same glob list as before: the bundle scripts leave
-      # intermediates in dist/ (tty7.app, entitlements.plist, the Windows staging
-      # dir) that must not reach the release assets.
+      # Hand the Windows artifacts to the assemble job rather than publishing
+      # them as soon as the first architecture finishes.
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            tty7/dist/*.dmg
-            tty7/dist/*.tar.gz
             tty7/dist/*.zip
             tty7/dist/*-setup.exe
-            tty7/dist/*.AppImage
           if-no-files-found: error
 
-  # The headless server binary remote workspaces install on the far machine
-  # (decision D10). Statically linked against musl so a single binary runs
-  # on any distro whatever its glibc vintage, and shipped as a bare executable
-  # rather than an archive so the client can fetch exactly one file and verify it
-  # against checksums.txt. The asset names are a contract with the installer:
-  # `tty7_core::daemon::install::asset` derives them from `uname -sm`.
-  #
-  # Separate from the `build` matrix above because it shares nothing with it: no
-  # GUI toolchain, no bundling, no code signing, two targets off one runner.
+  # Build the headless server for Windows remote workspaces.
   server-musl:
     strategy:
       fail-fast: false
