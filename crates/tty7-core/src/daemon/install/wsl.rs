@@ -688,8 +688,9 @@ pub fn ensure_wsl_server(distro: &str) -> io::Result<String> {
 }
 
 /// Ask each WSL daemon to stop after the GUI and its bridges have had time to
-/// close. The command is detached so a slow WSL startup cannot delay the quit;
-/// the daemon itself performs the graceful shutdown through `--stop`.
+/// close. The command is started asynchronously so a slow WSL startup cannot
+/// delay the quit; the daemon itself performs the graceful shutdown through
+/// `--stop`.
 #[cfg(windows)]
 pub fn stop_servers(distros: &[String]) {
     for distro in distros {
@@ -703,7 +704,6 @@ pub fn stop_servers(distros: &[String]) {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         crate::core::proc::hide_console(&mut cmd);
-        crate::daemon::spawn::detach_child(&mut cmd);
         match cmd.spawn() {
             Ok(child) => {
                 log::info!("scheduled tty7 server self-stop for {}", host_label(distro));
