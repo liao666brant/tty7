@@ -19,6 +19,7 @@ jobs:
             os: windows
             arch: x86_64
             target: x86_64-pc-windows-msvc
+            wsl-server: tty7-server-linux-x86_64-musl
           # Cross-compiled from the x64 runner, like `server-windows`'s ARM64
           # leg. Experimental until it has shipped once: a failure here drops
           # the ARM64 packages from the release instead of holding it up, and
@@ -27,6 +28,7 @@ jobs:
             os: windows
             arch: arm64
             target: aarch64-pc-windows-msvc
+            wsl-server: tty7-server-linux-aarch64-musl
             experimental: true
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental == true }}
